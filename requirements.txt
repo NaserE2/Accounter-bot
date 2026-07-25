@@ -4,7 +4,7 @@ google-auth==2.0.0
 Pillow>=10.1.0
 pytesseract==0.3.10
 pdf2image==1.16.0
-faster-whisper
+faster-whisper==1.0.3
 google-generativeai==0.3.0
 jdatetime==4.1.0
 fpdf2==2.7.4
