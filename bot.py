@@ -15,13 +15,10 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
 import gspread
 from google.oauth2.service_account import Credentials
-import whisper
 from PIL import Image
 import pytesseract
 from pdf2image import convert_from_path
 import google.generativeai as genai
-from gtts import gTTS
-import io
 
 # ---------- تنظیمات اولیه ----------
 TOKEN = os.getenv("BOT_TOKEN")
@@ -149,15 +146,7 @@ def process_with_gemini(raw_text):
         logger.error(f"خطا در جیمینی: {e}. استفاده از Fallback...")
         return fallback_parse(raw_text)
 
-# ---------- توابع تبدیل صدا و عکس ----------
-logger.info("در حال بارگذاری مدل Whisper...")
-model_whisper = whisper.load_model("base")
-logger.info("مدل Whisper بارگذاری شد.")
-
-def voice_to_text(voice_file_path):
-    result = model_whisper.transcribe(voice_file_path, language="fa")
-    return result["text"].strip()
-
+# ---------- توابع تبدیل عکس و PDF ----------
 def extract_text_from_image(image_path):
     image = Image.open(image_path)
     return pytesseract.image_to_string(image, lang="fas+eng").strip()
@@ -265,9 +254,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🏦 به حسابدار هوشمند خوش آمدید!\n\n"
         "🌟 قابلیت‌ها:\n"
         "1️⃣ ارسال ویس، عکس، PDF یا متن برای ثبت خودکار\n"
-        "2️⃣ چت صوتی (سؤال بپرسید، پاسخ صوتی بشنوید)\n"
-        "3️⃣ گزارش‌ها: /report, /monthly, /yearly 1403, /status\n"
-        "4️⃣ مدیریت: /undo, /edit [ردیف] [فیلد] [مقدار]"
+        "2️⃣ تشخیص هوشمند توسط Gemini (با Fallback دستی)\n"
+        "3️⃣ محاسبه خودکار سهام شراکت ویلای یالبندان\n"
+        "4️⃣ گزارش‌ها: /report, /monthly, /yearly 1403, /status\n"
+        "5️⃣ مدیریت: /undo, /edit [ردیف] [فیلد] [مقدار]"
     )
 
 async def process_queue():
@@ -290,42 +280,45 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         asyncio.create_task(process_queue())
 
 async def handle_input_internal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    raw_text, is_voice_query = "", False
+    raw_text = ""
     
     try:
         if update.message.voice:
+            # دانلود ویس و ارسال مستقیم به Gemini برای تبدیل به متن و استخراج اطلاعات
             voice_file = await update.message.voice.get_file()
             with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
                 await voice_file.download_to_drive(tmp.name)
-                raw_text = voice_to_text(tmp.name)
+                
+                # استفاده از قابلیت چندوجهی Gemini برای پردازش مستقیم ویس
+                file_obj = genai.upload_file(tmp.name, mime_type="audio/ogg")
+                response = gemini_model.generate_content(file_obj)
+                raw_text = response.text.strip()
+                
             os.unlink(tmp.name)
-            is_voice_query = True
+            
         elif update.message.photo:
             photo_file = await update.message.photo[-1].get_file()
             with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
                 await photo_file.download_to_drive(tmp.name)
                 raw_text = extract_text_from_image(tmp.name)
             os.unlink(tmp.name)
+            
         elif update.message.document and update.message.document.mime_type == "application/pdf":
             pdf_file = await update.message.document.get_file()
             with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
                 await pdf_file.download_to_drive(tmp.name)
                 raw_text = extract_text_from_pdf(tmp.name)
             os.unlink(tmp.name)
+            
         elif update.message.text:
             raw_text = update.message.text
-            if any(w in raw_text for w in ["؟", "چقدر", "چند", "کی", "کجا", "چه", "آیا"]):
-                is_voice_query = True
+            
         else:
             await update.message.reply_text("❌ نوع ورودی پشتیبانی نمی‌شود.")
             return
 
         if not raw_text.strip():
-            await update.message.reply_text("❌ متنی استخراج نشد.")
-            return
-
-        if is_voice_query and len(raw_text) > 10:
-            await handle_voice_query(update, context, raw_text)
+            await update.message.reply_text("❌ محتوایی استخراج نشد.")
             return
 
         data, error = process_with_gemini(raw_text)
@@ -339,29 +332,13 @@ async def handle_input_internal(update: Update, context: ContextTypes.DEFAULT_TY
                 [InlineKeyboardButton("مه‌یاس", callback_data="user_مه‌یاس"), InlineKeyboardButton("خونه (همه)", callback_data="user_همه")]
             ]
             context.user_data['pending_data'] = data
-            await update.message.reply_text("👨‍👩‍👧 این هزینه/درآمد برای کدام یک از اعضای خانواده است؟", reply_markup=InlineKeyboardMarkup(keyboard))
+            await update.message.reply_text("👨👩‍👧 این هزینه/درآمد برای کدام یک از اعضای خانواده است؟", reply_markup=InlineKeyboardMarkup(keyboard))
             return
 
         await save_transaction(update, context, data)
     except Exception as e:
         logger.error(f"خطای غیرمنتظره در پردازش: {e}")
         await update.message.reply_text("❌ خطایی رخ داد. لطفاً دوباره تلاش کنید.")
-
-async def handle_voice_query(update: Update, context: ContextTypes.DEFAULT_TYPE, query_text: str):
-    try:
-        prompt = f"شما دستیار مالی خانواده ناصر هستید. به این سؤال کوتاه و دقیق پاسخ دهید: '{query_text}'"
-        response = gemini_model.generate_content(prompt)
-        answer_text = response.text.strip()
-        await update.message.reply_text(f"🤖 {answer_text}")
-        
-        tts = gTTS(text=answer_text, lang='fa', slow=False)
-        audio_bytes = io.BytesIO()
-        tts.write_to_fp(audio_bytes)
-        audio_bytes.seek(0)
-        await update.message.reply_voice(voice=audio_bytes, caption="🎧 پاسخ صوتی")
-    except Exception as e:
-        logger.error(f"خطا در چت صوتی: {e}")
-        await update.message.reply_text("❌ در پردازش سؤال خطایی رخ داد.")
 
 async def save_transaction(update: Update, context: ContextTypes.DEFAULT_TYPE, data):
     now_tehran = datetime.now(TIMEZONE)
@@ -371,7 +348,7 @@ async def save_transaction(update: Update, context: ContextTypes.DEFAULT_TYPE, d
     save_to_sheet(sheet, jdatetime.date.today().strftime("%Y-%m-%d"), now_tehran.strftime("%Y-%m-%d %H:%M"),
                   data['account'], data['type'], data['amount'], data['category'], data['description'], data.get('user', 'ناصر'), share_text)
     
-    reply = f"✅ ثبت شد!\n📌 حساب: {data['account']}\n💰 مبلغ: {data['amount']:,} تومان\n👤 کاربر: {data.get('user', 'ناصر')}"
+    reply = f"✅ ثبت شد!\n حساب: {data['account']}\n مبلغ: {data['amount']:,} تومان\n👤 کاربر: {data.get('user', 'ناصر')}"
     if share_text: reply += f"\n🔗 سهم: {share_text}"
     await update.message.reply_text(reply)
 
@@ -399,7 +376,7 @@ async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         total_in = df_today[df_today['نوع تراکنش'] == 'درآمد']['مبلغ(تومان)'].sum()
         total_out = df_today[df_today['نوع تراکنش'] == 'هزینه']['مبلغ(تومان)'].sum()
-        await update.message.reply_text(f"📊 گزارش روزانه ({today}):\n💵 درآمد: {total_in:,.0f}\n💸 هزینه: {total_out:,.0f}\n📈 مانده: {total_in - total_out:,.0f}")
+        await update.message.reply_text(f" گزارش روزانه ({today}):\n💵 درآمد: {total_in:,.0f}\n هزینه: {total_out:,.0f}\n📈 مانده: {total_in - total_out:,.0f}")
 
 async def undo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id): return
@@ -423,12 +400,12 @@ async def edit_transaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     records = sheet.get_all_values()
     
     if len(records) < row_num + 1:
-        await update.message.reply_text("❌ شماره ردیف نامعتبر است.")
+        await update.message.reply_text(" شماره ردیف نامعتبر است.")
         return
     
     field_map = {"amount": "مبلغ(تومان)", "category": "دسته‌بندی", "description": "توضیحات کامل", "user": "کاربر"}
     if field not in field_map:
-        await update.message.reply_text("❌ فیلد نامعتبر.")
+        await update.message.reply_text(" فیلد نامعتبر.")
         return
     
     col_index = records[0].index(field_map[field]) + 1
@@ -452,7 +429,7 @@ def main():
     scheduler.add_job(auto_backup, CronTrigger(hour=0, minute=0), args=[app])
     scheduler.start()
 
-    logger.info("🤖 ربات حسابداری هوشمند راه‌اندازی شد!")
+    logger.info("🤖 ربات حسابداری هوشمند (نسخه سبک) راه‌اندازی شد!")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
