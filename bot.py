@@ -150,7 +150,6 @@ def process_with_gemini(raw_text):
         return fallback_parse(raw_text)
 
 # ---------- توابع تبدیل صدا و عکس ----------
-# مدل یک بار لود می‌شود تا در درخواست‌های بعدی سریع باشد
 logger.info("در حال بارگذاری مدل Whisper...")
 model_whisper = whisper.load_model("base")
 logger.info("مدل Whisper بارگذاری شد.")
@@ -184,7 +183,6 @@ def generate_villa_pdf(shamsi_month_str, df_villa):
     pdf = FPDF()
     pdf.add_page()
     
-    # پشتیبانی از هر دو مسیر فونت (لوکال و داکر)
     font_path = "./DejaVuSans.ttf" if os.path.exists("./DejaVuSans.ttf") else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
     pdf.add_font('DejaVu', '', font_path, uni=True)
     pdf.set_font('DejaVu', size=16)
@@ -393,4 +391,69 @@ async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📭 هنوز ثبت‌ای ندارید.")
         return
     df = pd.DataFrame(records[1:], columns=records[0])
-    today = jdatetime.date.today().
+    today = jdatetime.date.today().strftime("%Y-%m-%d")
+    df_today = df[df['تاریخ شمسی'] == today]
+    
+    if df_today.empty:
+        await update.message.reply_text(f"📭 امروز {today} تراکنشی نداشتید.")
+    else:
+        total_in = df_today[df_today['نوع تراکنش'] == 'درآمد']['مبلغ(تومان)'].sum()
+        total_out = df_today[df_today['نوع تراکنش'] == 'هزینه']['مبلغ(تومان)'].sum()
+        await update.message.reply_text(f"📊 گزارش روزانه ({today}):\n💵 درآمد: {total_in:,.0f}\n💸 هزینه: {total_out:,.0f}\n📈 مانده: {total_in - total_out:,.0f}")
+
+async def undo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id): return
+    sheet = connect_sheets()
+    records = sheet.get_all_values()
+    if len(records) < 2:
+        await update.message.reply_text("📭 هیچ تراکنشی برای لغو وجود ندارد.")
+        return
+    sheet.delete_rows(len(records))
+    await update.message.reply_text("✅ آخرین تراکنش لغو شد.")
+
+async def edit_transaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id): return
+    args = context.args
+    if len(args) < 3:
+        await update.message.reply_text("فرمت: /edit [ردیف] [فیلد] [مقدار]\nفیلدها: amount, category, description, user")
+        return
+    
+    row_num, field, new_value = int(args[0]), args[1], " ".join(args[2:])
+    sheet = connect_sheets()
+    records = sheet.get_all_values()
+    
+    if len(records) < row_num + 1:
+        await update.message.reply_text("❌ شماره ردیف نامعتبر است.")
+        return
+    
+    field_map = {"amount": "مبلغ(تومان)", "category": "دسته‌بندی", "description": "توضیحات کامل", "user": "کاربر"}
+    if field not in field_map:
+        await update.message.reply_text("❌ فیلد نامعتبر.")
+        return
+    
+    col_index = records[0].index(field_map[field]) + 1
+    sheet.update_cell(row_num + 1, col_index, new_value)
+    await update.message.reply_text(f"✅ فیلد {field} به‌روزرسانی شد.")
+
+# ---------- راه‌اندازی اصلی ----------
+def main():
+    app = Application.builder().token(TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("report", report))
+    app.add_handler(CommandHandler("undo", undo))
+    app.add_handler(CommandHandler("edit", edit_transaction))
+    app.add_handler(MessageHandler(filters.VOICE | filters.PHOTO | filters.Document.ALL | filters.TEXT, handle_input))
+    app.add_handler(CallbackQueryHandler(button_callback, pattern="^user_"))
+
+    scheduler = AsyncIOScheduler(timezone=TIMEZONE)
+    scheduler.add_job(send_monthly_villa_report, CronTrigger(day="last", hour=23, minute=59), args=[app])
+    scheduler.add_job(send_nightly_reminder, CronTrigger(hour=23, minute=0), args=[app])
+    scheduler.add_job(auto_backup, CronTrigger(hour=0, minute=0), args=[app])
+    scheduler.start()
+
+    logger.info("🤖 ربات حسابداری هوشمند راه‌اندازی شد!")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == "__main__":
+    main()
