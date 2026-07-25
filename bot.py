@@ -58,7 +58,7 @@ is_processing = False
 
 # ---------- تبدیل اعداد فارسی/عربی به انگلیسی ----------
 def normalize_numbers(text):
-    persian_nums = '۰۱۲۳۴۵۶۷۸۹'
+    persian_nums = '۰۱۲۳۵۶۷۸۹'
     arabic_nums = '٠١٢٣٤٥٦٧٨٩'
     english_nums = '0123456789'
     table = str.maketrans(persian_nums + arabic_nums, english_nums * 2)
@@ -138,7 +138,7 @@ def fallback_parse(raw_text):
     elif "تعمیر" in text_lower: category = "تعمیرات"
     
     if amount == 0:
-        return None, "⚠️ مبلغی پیدا نشد! لطفاً عدد را به تومان بنویسید (مثال: ۵۰۰۰۰۰ تومان)."
+        return None, "️ مبلغی پیدا نشد! لطفاً عدد را به تومان بنویسید (مثال: ۵۰۰۰۰۰ تومان)."
     
     return {"account": account, "type": trans_type, "amount": amount, "category": category, "description": raw_text[:100], "user": user}, None
 
@@ -215,7 +215,7 @@ def generate_villa_pdf(shamsi_month_str, df_villa):
     pdf.cell(95, 10, txt="سود خالص", border=1)
     pdf.cell(95, 10, txt=f"{net:,.0f} تومان", border=1, ln=True)
     pdf.ln(5)
-    pdf.cell(95, 10, txt="سهم ناصر (۴.۵/۶)", border=1)
+    pdf.cell(95, 10, txt="سهم ناصر (۴.۵/)", border=1)
     pdf.cell(95, 10, txt=f"{net * (4.5/6):,.0f} تومان", border=1, ln=True)
     pdf.cell(95, 10, txt="سهم ناهید (۱.۵/۶)", border=1)
     pdf.cell(95, 10, txt=f"{net * (1.5/6):,.0f} تومان", border=1, ln=True)
@@ -251,7 +251,7 @@ async def send_monthly_villa_report(context: ContextTypes.DEFAULT_TYPE):
             pdf_path = generate_villa_pdf(month_str, df_villa)
             try:
                 with open(pdf_path, 'rb') as f:
-                    await context.bot.send_document(chat_id=ADMIN_USER_ID, document=f, caption=f"📊 گزارش ماهانه {month_str}")
+                    await context.bot.send_document(chat_id=ADMIN_USER_ID, document=f, caption=f" گزارش ماهانه {month_str}")
             finally:
                 os.unlink(pdf_path)
 
@@ -277,10 +277,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🏦 به حسابدار هوشمند خوش آمدید!\n\n"
         " قابلیت‌ها:\n"
-        "1️⃣ ارسال ویس، عکس، PDF یا متن برای ثبت خودکار\n"
-        "2️⃣ تشخیص هوشمند توسط Gemini (با Fallback دستی)\n"
+        "1️ ارسال ویس، عکس، PDF یا متن برای ثبت خودکار\n"
+        "2️ تشخیص هوشمند توسط Gemini (با Fallback دستی)\n"
         "3️⃣ محاسبه خودکار سهام شراکت ویلای یالبندان\n"
-        "4️⃣ گزارش‌ها: /report, /monthly, /yearly 1403, /status\n"
+        "4️ گزارش‌ها: /report, /monthly, /yearly 1403, /status\n"
         "5️⃣ مدیریت: /undo, /edit [ردیف] [فیلد] [مقدار]"
     )
 
@@ -358,7 +358,7 @@ async def handle_input_internal(update: Update, context: ContextTypes.DEFAULT_TY
                 [InlineKeyboardButton("مه‌یاس", callback_data="user_مه‌یاس"), InlineKeyboardButton("خونه (همه)", callback_data="user_همه")]
             ]
             context.user_data['pending_data'] = data
-            await update.message.reply_text("👨‍👩‍👧 این هزینه/درآمد برای کدام یک از اعضای خانواده است؟", reply_markup=InlineKeyboardMarkup(keyboard))
+            await update.message.reply_text("👨‍👩👧 این هزینه/درآمد برای کدام یک از اعضای خانواده است؟", reply_markup=InlineKeyboardMarkup(keyboard))
             return
 
         await save_transaction(update, context, data)
@@ -409,7 +409,7 @@ async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         total_in = df_today[df_today['نوع تراکنش'] == 'درآمد']['مبلغ(تومان)'].sum()
         total_out = df_today[df_today['نوع تراکنش'] == 'هزینه']['مبلغ(تومان)'].sum()
-        await update.message.reply_text(f"📊 گزارش روزانه ({today}):\n💵 درآمد: {total_in:,.0f}\n💸 هزینه: {total_out:,.0f}\n📈 مانده: {total_in - total_out:,.0f}")
+        await update.message.reply_text(f"📊 گزارش روزانه ({today}):\n💵 درآمد: {total_in:,.0f}\n💸 هزینه: {total_out:,.0f}\n مانده: {total_in - total_out:,.0f}")
 
 async def undo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id): return
@@ -434,7 +434,7 @@ async def edit_transaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     row_num, field, new_value = int(args[0]), args[1], " ".join(args[2:])
     sheet = connect_sheets()
     if not sheet:
-        await update.message.reply_text("❌ خطا در اتصال به گوگل شیت.")
+        await update.message.reply_text(" خطا در اتصال به گوگل شیت.")
         return
     records = sheet.get_all_values()
     
