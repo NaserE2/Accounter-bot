@@ -222,4 +222,243 @@ def generate_villa_pdf(shamsi_month_str, df_villa):
         pdf.cell(40, 8, txt=str(row['تاریخ شمسی'])[5:10], border=1)
         pdf.cell(40, 8, txt=str(row['نوع تراکنش']), border=1)
         pdf.cell(40, 8, txt=f"{row['مبلغ(تومان)']:,.0f}", border=1)
-        pdf.cell(70, 8, txt=str(row['توض
+        pdf.cell(70, 8, txt=str(row['توضیحات کامل'])[:25], border=1, ln=True)
+
+    temp_pdf = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+    pdf.output(temp_pdf.name)
+    return temp_pdf.name
+
+# ---------- وظایف زمان‌بندی شده ----------
+async def send_monthly_villa_report(context: ContextTypes.DEFAULT_TYPE):
+    today = jdatetime.date.today()
+    if today.day == jdatetime.date(today.year, today.month, 1).days_in_month:
+        sheet = connect_sheets()
+        if not sheet: return
+        records = sheet.get_all_values()
+        if len(records) < 2: return
+        df = pd.DataFrame(records[1:], columns=records[0])
+        month_str = f"{today.year}-{today.month:02d}"
+        df_villa = df[(df['تاریخ شمسی'].str.startswith(month_str)) & (df['نوع حساب'] == 'ویلا_یالبندان')]
+        if not df_villa.empty:
+            pdf_path = generate_villa_pdf(month_str, df_villa)
+            try:
+                with open(pdf_path, 'rb') as f:
+                    await context.bot.send_document(chat_id=ADMIN_USER_ID, document=f, caption=f" گزارش ماهانه {month_str}")
+            finally:
+                os.unlink(pdf_path)
+
+async def send_nightly_reminder(context: ContextTypes.DEFAULT_TYPE):
+    message = "🌙 یادآوری شبانه: لطفاً اگر هزینه یا درآمدی امروز داشته‌اید، برای حسابدار هوشمند بفرستید."
+    for user_id in REMINDER_USERS:
+        try:
+            await context.bot.send_message(chat_id=user_id, text=message)
+        except Exception as e:
+            logger.error(f"ارسال یادآوری به {user_id} ناموفق: {e}")
+
+async def auto_backup(context: ContextTypes.DEFAULT_TYPE):
+    backup_data()
+
+# ---------- هندلرهای ربات ----------
+def is_allowed(user_id):
+    return user_id in ALLOWED_USERS
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id):
+        await update.message.reply_text("⛔ شما دسترسی به این ربات ندارید.")
+        return
+    await update.message.reply_text(
+        "🏦 به حسابدار هوشمند خوش آمدید!\n\n"
+        "🌟 قابلیت‌ها:\n"
+        "1️⃣ ارسال ویس، عکس، PDF یا متن برای ثبت خودکار\n"
+        "2️⃣ تشخیص هوشمند توسط Gemini (با Fallback دستی)\n"
+        "3️⃣ محاسبه خودکار سهام شراکت ویلای یالبندان\n"
+        "4️⃣ گزارش‌ها: /report, /monthly, /yearly 1403, /status\n"
+        "5️ مدیریت: /undo, /edit [ردیف] [فیلد] [مقدار]"
+    )
+
+async def process_queue():
+    global is_processing
+    if is_processing: return
+    is_processing = True
+    try:
+        while not request_queue.empty():
+            update, context = await request_queue.get()
+            await handle_input_internal(update, context)
+    finally:
+        is_processing = False
+
+async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id):
+        await update.message.reply_text("⛔ شما دسترسی به این ربات ندارید.")
+        return
+    await request_queue.put((update, context))
+    if not is_processing:
+        asyncio.create_task(process_queue())
+
+async def handle_input_internal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    raw_text = ""
+    
+    try:
+        if update.message.voice:
+            voice_file = await update.message.voice.get_file()
+            with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+                await voice_file.download_to_drive(tmp.name)
+                
+                # استفاده از قابلیت چندوجهی Gemini برای پردازش مستقیم ویس
+                file_obj = genai.upload_file(tmp.name, mime_type="audio/ogg")
+                response = gemini_model.generate_content(file_obj)
+                raw_text = response.text.strip()
+                
+            os.unlink(tmp.name)
+            
+        elif update.message.photo:
+            photo_file = await update.message.photo[-1].get_file()
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+                await photo_file.download_to_drive(tmp.name)
+                raw_text = extract_text_from_image(tmp.name)
+            os.unlink(tmp.name)
+            
+        elif update.message.document and update.message.document.mime_type == "application/pdf":
+            pdf_file = await update.message.document.get_file()
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                await pdf_file.download_to_drive(tmp.name)
+                raw_text = extract_text_from_pdf(tmp.name)
+            os.unlink(tmp.name)
+            
+        elif update.message.text:
+            raw_text = update.message.text
+            
+        else:
+            await update.message.reply_text(" نوع ورودی پشتیبانی نمی‌شود.")
+            return
+
+        if not raw_text.strip():
+            await update.message.reply_text("❌ محتوایی استخراج نشد.")
+            return
+
+        data, error = process_with_gemini(raw_text)
+        if error:
+            await update.message.reply_text(error)
+            return
+
+        if data['account'] == 'خانواده' and data.get('user') in [None, 'همه', '']:
+            keyboard = [
+                [InlineKeyboardButton("ناصر", callback_data="user_ناصر"), InlineKeyboardButton("کیمیا", callback_data="user_کیمیا")],
+                [InlineKeyboardButton("مه‌یاس", callback_data="user_مه‌یاس"), InlineKeyboardButton("خونه (همه)", callback_data="user_همه")]
+            ]
+            context.user_data['pending_data'] = data
+            await update.message.reply_text("👨‍👩‍ این هزینه/درآمد برای کدام یک از اعضای خانواده است؟", reply_markup=InlineKeyboardMarkup(keyboard))
+            return
+
+        await save_transaction(update, context, data)
+    except Exception as e:
+        logger.error(f"خطای غیرمنتظره در پردازش: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ خطایی رخ داد: {str(e)[:100]}")
+
+async def save_transaction(update: Update, context: ContextTypes.DEFAULT_TYPE, data):
+    now_tehran = datetime.now(TIMEZONE)
+    sheet = connect_sheets()
+    if not sheet:
+        await update.message.reply_text("❌ خطا در اتصال به گوگل شیت. لطفاً متغیر GOOGLE_CREDS را بررسی کنید.")
+        return
+        
+    share_text = calculate_villa_shares(data['amount'], data['type']) if data['account'] == 'ویلا_یالبندان' else ""
+    
+    save_to_sheet(sheet, jdatetime.date.today().strftime("%Y-%m-%d"), now_tehran.strftime("%Y-%m-%d %H:%M"),
+                  data['account'], data['type'], data['amount'], data['category'], data['description'], data.get('user', 'ناصر'), share_text)
+    
+    reply = f"✅ ثبت شد!\n حساب: {data['account']}\n مبلغ: {data['amount']:,} تومان\n👤 کاربر: {data.get('user', 'ناصر')}"
+    if share_text: reply += f"\n🔗 سهم: {share_text}"
+    await update.message.reply_text(reply)
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    data = context.user_data.get('pending_data')
+    if data:
+        data['user'] = update.callback_query.data.replace("user_", "")
+        await save_transaction(update, context, data)
+        context.user_data.pop('pending_data', None)
+
+async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id): return
+    sheet = connect_sheets()
+    if not sheet:
+        await update.message.reply_text("❌ خطا در اتصال به گوگل شیت.")
+        return
+    records = sheet.get_all_values()
+    if len(records) < 2:
+        await update.message.reply_text("📭 هنوز ثبت‌ای ندارید.")
+        return
+    df = pd.DataFrame(records[1:], columns=records[0])
+    today = jdatetime.date.today().strftime("%Y-%m-%d")
+    df_today = df[df['تاریخ شمسی'] == today]
+    
+    if df_today.empty:
+        await update.message.reply_text(f"📭 امروز {today} تراکنشی نداشتید.")
+    else:
+        total_in = df_today[df_today['نوع تراکنش'] == 'درآمد']['مبلغ(تومان)'].sum()
+        total_out = df_today[df_today['نوع تراکنش'] == 'هزینه']['مبلغ(تومان)'].sum()
+        await update.message.reply_text(f"📊 گزارش روزانه ({today}):\n💵 درآمد: {total_in:,.0f}\n💸 هزینه: {total_out:,.0f}\n📈 مانده: {total_in - total_out:,.0f}")
+
+async def undo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id): return
+    sheet = connect_sheets()
+    if not sheet:
+        await update.message.reply_text("❌ خطا در اتصال به گوگل شیت.")
+        return
+    records = sheet.get_all_values()
+    if len(records) < 2:
+        await update.message.reply_text("📭 هیچ تراکنشی برای لغو وجود ندارد.")
+        return
+    sheet.delete_rows(len(records))
+    await update.message.reply_text("✅ آخرین تراکنش لغو شد.")
+
+async def edit_transaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id): return
+    args = context.args
+    if len(args) < 3:
+        await update.message.reply_text("فرمت: /edit [ردیف] [فیلد] [مقدار]\nفیلدها: amount, category, description, user")
+        return
+    
+    row_num, field, new_value = int(args[0]), args[1], " ".join(args[2:])
+    sheet = connect_sheets()
+    if not sheet:
+        await update.message.reply_text("❌ خطا در اتصال به گوگل شیت.")
+        return
+    records = sheet.get_all_values()
+    
+    if len(records) < row_num + 1:
+        await update.message.reply_text("❌ شماره ردیف نامعتبر است.")
+        return
+    
+    field_map = {"amount": "مبلغ(تومان)", "category": "دسته‌بندی", "description": "توضیحات کامل", "user": "کاربر"}
+    if field not in field_map:
+        await update.message.reply_text("❌ فیلد نامعتبر.")
+        return
+    
+    col_index = records[0].index(field_map[field]) + 1
+    sheet.update_cell(row_num + 1, col_index, new_value)
+    await update.message.reply_text(f"✅ فیلد {field} به‌روزرسانی شد.")
+
+# ---------- راه‌اندازی اصلی ----------
+def main():
+    app = Application.builder().token(TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("report", report))
+    app.add_handler(CommandHandler("undo", undo))
+    app.add_handler(CommandHandler("edit", edit_transaction))
+    app.add_handler(MessageHandler(filters.VOICE | filters.PHOTO | filters.Document.ALL | filters.TEXT, handle_input))
+    app.add_handler(CallbackQueryHandler(button_callback, pattern="^user_"))
+
+    scheduler = AsyncIOScheduler(timezone=TIMEZONE)
+    scheduler.add_job(send_monthly_villa_report, CronTrigger(day="last", hour=23, minute=59), args=[app])
+    scheduler.add_job(send_nightly_reminder, CronTrigger(hour=23, minute=0), args=[app])
+    scheduler.add_job(auto_backup, CronTrigger(hour=0, minute=0), args=[app])
+    scheduler.start()
+
+    logger.info("🤖 ربات حسابداری هوشمند (نسخه سبک) راه‌اندازی شد!")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == "__main__":
+    main()
