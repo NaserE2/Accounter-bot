@@ -21,7 +21,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 import gspread
 from google.oauth2.service_account import Credentials
 
-import whisper
+from faster_whisper import WhisperModel
 from PIL import Image
 import pytesseract
 from pdf2image import convert_from_path
