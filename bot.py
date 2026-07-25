@@ -225,10 +225,14 @@ def process_with_gemini(raw_text):
         return fallback_parse(raw_text)
 
 # ---------- توابع تبدیل صدا و عکس ----------
-model_whisper = whisper.load_model("base")
+model = None
 def voice_to_text(voice_file_path):
-    result = model_whisper.transcribe(voice_file_path, language="fa")
-    return result["text"].strip()
+    global model
+    if model is None:
+        model = WhisperModel("base", device="cpu", compute_type="int8")
+    
+    segments, info = model.transcribe(voice_file_path, language="fa")
+    return " ".join([segment.text for segment in segments])
 
 def extract_text_from_image(image_path):
     image = Image.open(image_path)
