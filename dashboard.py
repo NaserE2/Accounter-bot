@@ -9,7 +9,7 @@ import gspread
 import jdatetime
 
 st.set_page_config(page_title="داشبورد حسابداری هوشمند", layout="wide", page_icon="🏦")
-st.title(" داشبورد مدیریتی حسابدار هوشمند")
+st.title("🏦 داشبورد مدیریتی حسابدار هوشمند")
 
 def connect_sheets():
     creds_json = os.getenv("GOOGLE_CREDS")
@@ -18,14 +18,25 @@ def connect_sheets():
         return None
     try:
         creds_dict = json.loads(creds_json)
-        # scopes کامل‌تر برای دسترسی به Drive و Sheets
+        # اضافه کردن دسترسی Drive برای امکان ساخت شیت جدید
         scopes = [
             "https://www.googleapis.com/auth/spreadsheets",
             "https://www.googleapis.com/auth/drive"
         ]
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
         client = gspread.authorize(creds)
-        return client.open("حسابداری_هوشمند_نهایی").sheet1
+        
+        try:
+            sheet = client.open("حسابداری_هوشمند_نهایی").sheet1
+        except gspread.SpreadsheetNotFound:
+            # اگر شیت وجود نداشت، خودش می‌سازد
+            sh = client.create("حسابداری_هوشمند_نهایی")
+            sheet = sh.sheet1
+            headers = ["ردیف", "تاریخ شمسی", "تاریخ میلادی", "نوع حساب", "نوع تراکنش", "مبلغ(تومان)", 
+                       "دسته‌بندی", "توضیحات کامل", "کاربر", "سهم‌بندی شرکا"]
+            sheet.append_row(headers)
+            
+        return sheet
     except Exception as e:
         st.error(f"خطا در اتصال به گوگل شیت: {e}")
         return None
@@ -88,7 +99,7 @@ with col2:
         fig_line.update_layout(title="روند درآمد و هزینه", xaxis_title="تاریخ", yaxis_title="مبلغ (تومان)")
         st.plotly_chart(fig_line, use_container_width=True)
 
-st.subheader(" لیست کامل تراکنش‌ها")
+st.subheader("📋 لیست کامل تراکنش‌ها")
 st.dataframe(df_filtered[['تاریخ شمسی', 'نوع حساب', 'نوع تراکنش', 'مبلغ(تومان)', 'دسته‌بندی', 'کاربر', 'توضیحات کامل']], use_container_width=True)
 
 csv = df_filtered.to_csv(index=False, encoding='utf-8-sig')
