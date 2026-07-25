@@ -56,6 +56,14 @@ logger = logging.getLogger(__name__)
 request_queue = asyncio.Queue()
 is_processing = False
 
+# ---------- تبدیل اعداد فارسی/عربی به انگلیسی ----------
+def normalize_numbers(text):
+    persian_nums = '۰۱۲۳۴۵۶۷۸۹'
+    arabic_nums = '٠١٢٣٤٥٦٧٨٩'
+    english_nums = '0123456789'
+    table = str.maketrans(persian_nums + arabic_nums, english_nums * 2)
+    return text.translate(table)
+
 # ---------- اتصال به گوگل شیت ----------
 def connect_sheets():
     try:
@@ -96,29 +104,29 @@ def backup_data():
     except Exception as e:
         logger.error(f"خطا در پشتیبان‌گیری: {e}")
 
-# ---------- تبدیل اعداد فارسی به انگلیسی ----------
-def normalize_numbers(text):
-    persian_nums = '۰۱۲۳۴۵۶۷۸۹'
-    arabic_nums = '٠١٢٣٤٥٦٧٨٩'
-    english_nums = '0123456789'
-    table = str.maketrans(persian_nums + arabic_nums, english_nums * 2)
-    return text.translate(table)
-
 # ---------- Fallback با کلمات کلیدی ----------
 def fallback_parse(raw_text):
     text_lower = normalize_numbers(raw_text.lower())
     account, trans_type, category, user = "خانواده", "هزینه", "سایر", "ناصر"
     amount = 0
     
-    if any(w in text_lower for w in ["ویلا", "یالبندان", "اجاره", "میهمان", "شبانه"]):
+    # تشخیص حساب با طیف وسیع کلمات
+    villa_keywords = ["ویلا", "یالبندان", "اجاره", "میهمان", "شبانه", "مسافر", "رزرو"]
+    personal_keywords = ["حساب شخصی", "شخصی", "جیب", "توجیبی", "خرج خودم", "من", "ناصر", "کیمیا", "مه یاس", "مهیاس"]
+    
+    if any(w in text_lower for w in villa_keywords):
         account = "ویلا_یالبندان"
-    if any(w in text_lower for w in ["درآمد", "فروش", "دریافت"]):
+    elif any(w in text_lower for w in personal_keywords):
+        account = "خانواده"
+        
+    if any(w in text_lower for w in ["درآمد", "فروش", "دریافت", "واریز شد"]):
         trans_type = "درآمد"
+        
     if "کیمیا" in text_lower: user = "کیمیا"
     elif "مه یاس" in text_lower or "مهیاس" in text_lower: user = "مه‌یاس"
     elif "همه" in text_lower or "خونه" in text_lower: user = "همه"
     
-    # پشتیبانی از اعداد فارسی و انگلیسی
+    # استخراج مبلغ (فارسی و انگلیسی)
     match = re.search(r"(\d{1,3}(?:,\d{3})*|\d+)\s*(?:تومان|ت)", text_lower)
     if match:
         amount = int(match.group(1).replace(",", ""))
@@ -130,7 +138,7 @@ def fallback_parse(raw_text):
     elif "تعمیر" in text_lower: category = "تعمیرات"
     
     if amount == 0:
-        return None, "⚠️ مبلغی در متن پیدا نشد! لطفاً عدد را به صورت انگلیسی وارد کنید (مثلاً 500000)."
+        return None, "⚠️ مبلغی پیدا نشد! لطفاً عدد را به تومان بنویسید (مثال: ۵۰۰۰۰۰ تومان)."
     
     return {"account": account, "type": trans_type, "amount": amount, "category": category, "description": raw_text[:100], "user": user}, None
 
@@ -138,15 +146,15 @@ def fallback_parse(raw_text):
 def process_with_gemini(raw_text):
     try:
         prompt = f"""
-        شما یک دستیار مالی هوشمند هستید. متن زیر را تحلیل کن و فقط یک JSON معتبر برگردان.
+        شما یک دستیار مالی هوشمند هستید. متن زیر را تحلیل کن و فقط JSON برگردان.
         قوانین:
-        - account: "ویلا_یالبندان" یا "خانواده"
+        - account: "ویلا_یالبندان" یا "خانواده". اگر مربوط به اجاره، نظافت ویلا، مسافر بود -> ویلا_یالبندان. اگر خرج شخصی، خانواده، حساب شخصی بود -> خانواده.
         - type: "درآمد" یا "هزینه"
-        - amount: عدد به تومان (اگر نبود 0). حتماً اعداد فارسی را به انگلیسی تبدیل کن.
-        - category: مثلاً "اجاره", "شارژ", "خواربار", "قبوض", "تفریح", "درمان", "تعمیرات", "نظافت"
-        - description: خلاصه مطلب
-        - user: "ناصر", "کیمیا", "مه‌یاس" یا "همه" (اگر ویلا بود، "ناصر")
-        متن: "{raw_text}"
+        - amount: عدد به تومان. اعداد فارسی (مثل ۵۰) یا حروف (مثل پانصد) را به عدد انگلیسی تبدیل کن.
+        - category: "اجاره", "شارژ", "خواربار", "قبوض", "تفریح", "درمان", "تعمیرات", "نظافت", "حمل و نقل", "پوشاک", "تحصیل", "تبلیغات", "سایر"
+        - description: خلاصه کوتاه
+        - user: "ناصر", "کیمیا", "مه‌یاس" یا "همه". اگر ویلا بود -> "ناصر"
+        متن ورودی: "{raw_text}"
         فرمت خروجی: {{"account": "...", "type": "...", "amount": 0, "category": "...", "description": "...", "user": "..."}}
         """
         response = gemini_model.generate_content(prompt)
@@ -155,7 +163,7 @@ def process_with_gemini(raw_text):
         # تبدیل اعداد فارسی احتمالی در پاسخ جمینای
         data['amount'] = int(normalize_numbers(str(data.get('amount', 0))))
         if data.get("amount", 0) == 0:
-            return None, "⚠️ مبلغی در متن پیدا نشد! لطفاً عدد را به تومان وارد کنید."
+            return None, "️ مبلغی پیدا نشد! لطفاً عدد را به تومان بنویسید."
         return data, None
     except Exception as e:
         logger.error(f"خطا در جیمینی: {e}. استفاده از Fallback...")
@@ -243,7 +251,7 @@ async def send_monthly_villa_report(context: ContextTypes.DEFAULT_TYPE):
             pdf_path = generate_villa_pdf(month_str, df_villa)
             try:
                 with open(pdf_path, 'rb') as f:
-                    await context.bot.send_document(chat_id=ADMIN_USER_ID, document=f, caption=f" گزارش ماهانه {month_str}")
+                    await context.bot.send_document(chat_id=ADMIN_USER_ID, document=f, caption=f"📊 گزارش ماهانه {month_str}")
             finally:
                 os.unlink(pdf_path)
 
@@ -268,12 +276,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text(
         "🏦 به حسابدار هوشمند خوش آمدید!\n\n"
-        "🌟 قابلیت‌ها:\n"
+        " قابلیت‌ها:\n"
         "1️⃣ ارسال ویس، عکس، PDF یا متن برای ثبت خودکار\n"
         "2️⃣ تشخیص هوشمند توسط Gemini (با Fallback دستی)\n"
         "3️⃣ محاسبه خودکار سهام شراکت ویلای یالبندان\n"
         "4️⃣ گزارش‌ها: /report, /monthly, /yearly 1403, /status\n"
-        "5️ مدیریت: /undo, /edit [ردیف] [فیلد] [مقدار]"
+        "5️⃣ مدیریت: /undo, /edit [ردیف] [فیلد] [مقدار]"
     )
 
 async def process_queue():
@@ -300,13 +308,16 @@ async def handle_input_internal(update: Update, context: ContextTypes.DEFAULT_TY
     
     try:
         if update.message.voice:
+            # دانلود ویس و ارسال مستقیم به Gemini (بدون upload_file)
             voice_file = await update.message.voice.get_file()
             with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
                 await voice_file.download_to_drive(tmp.name)
                 
-                # استفاده از قابلیت چندوجهی Gemini برای پردازش مستقیم ویس
-                file_obj = genai.upload_file(tmp.name, mime_type="audio/ogg")
-                response = gemini_model.generate_content(file_obj)
+                # خواندن فایل صوتی و ارسال به مدل به صورت بایت
+                with open(tmp.name, "rb") as audio:
+                    audio_data = audio.read()
+                
+                response = gemini_model.generate_content(audio_data)
                 raw_text = response.text.strip()
                 
             os.unlink(tmp.name)
@@ -329,7 +340,7 @@ async def handle_input_internal(update: Update, context: ContextTypes.DEFAULT_TY
             raw_text = update.message.text
             
         else:
-            await update.message.reply_text(" نوع ورودی پشتیبانی نمی‌شود.")
+            await update.message.reply_text("❌ نوع ورودی پشتیبانی نمی‌شود.")
             return
 
         if not raw_text.strip():
@@ -347,13 +358,13 @@ async def handle_input_internal(update: Update, context: ContextTypes.DEFAULT_TY
                 [InlineKeyboardButton("مه‌یاس", callback_data="user_مه‌یاس"), InlineKeyboardButton("خونه (همه)", callback_data="user_همه")]
             ]
             context.user_data['pending_data'] = data
-            await update.message.reply_text("👨‍👩‍ این هزینه/درآمد برای کدام یک از اعضای خانواده است؟", reply_markup=InlineKeyboardMarkup(keyboard))
+            await update.message.reply_text("👨‍👩‍👧 این هزینه/درآمد برای کدام یک از اعضای خانواده است؟", reply_markup=InlineKeyboardMarkup(keyboard))
             return
 
         await save_transaction(update, context, data)
     except Exception as e:
         logger.error(f"خطای غیرمنتظره در پردازش: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ خطایی رخ داد: {str(e)[:100]}")
+        await update.message.reply_text(f"❌ خطایی رخ داد. لطفاً دوباره تلاش کنید.")
 
 async def save_transaction(update: Update, context: ContextTypes.DEFAULT_TYPE, data):
     now_tehran = datetime.now(TIMEZONE)
@@ -367,7 +378,7 @@ async def save_transaction(update: Update, context: ContextTypes.DEFAULT_TYPE, d
     save_to_sheet(sheet, jdatetime.date.today().strftime("%Y-%m-%d"), now_tehran.strftime("%Y-%m-%d %H:%M"),
                   data['account'], data['type'], data['amount'], data['category'], data['description'], data.get('user', 'ناصر'), share_text)
     
-    reply = f"✅ ثبت شد!\n حساب: {data['account']}\n مبلغ: {data['amount']:,} تومان\n👤 کاربر: {data.get('user', 'ناصر')}"
+    reply = f"✅ ثبت شد!\n📌 حساب: {data['account']}\n💰 مبلغ: {data['amount']:,} تومان\n👤 کاربر: {data.get('user', 'ناصر')}"
     if share_text: reply += f"\n🔗 سهم: {share_text}"
     await update.message.reply_text(reply)
 
